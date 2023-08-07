@@ -5,17 +5,33 @@ from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.decorators import action
 from django.shortcuts import get_object_or_404
 
+from .paginations import *
 from .models import *
 from .serializers import *
 from .permissions import IsOwnerOrReadOnly
-
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.filters import SearchFilter, OrderingFilter
 from django.conf import settings
+from django.db.models import Q, Count
 import os
 # Create your views here.
-class PostViewSet(viewsets.GenericViewSet,
-    mixins.ListModelMixin, mixins.CreateModelMixin, mixins.RetrieveModelMixin, mixins.DestroyModelMixin, mixins.UpdateModelMixin):
-    queryset = Post.objects.all()
+class PostViewSet(viewsets.ModelViewSet):
+    queryset = Post.objects.annotate(
+        like_cnt = Count(
+            "reactions", filter = Q(reactions__reaction= "like"), distinct = True
+            ),
+        dislike_cnt = Count(
+            "reactions", filter = Q(reactions__reaction= "dislike"), distinct = True
+        ),
+    )
     # serializer_class = PostSerializer
+    filter_backends =[DjangoFilterBackend, SearchFilter, OrderingFilter]
+    
+    filterset_fields = ["title", "writer", "tag__name"]
+    search_fields = ["title", "writer", "=tag__name"]
+    ordering_fields = ["created_at", "updated_at", "like_cnt", "dislike_cnt"]
+
+    pagination_class = PostPagination
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -25,6 +41,8 @@ class PostViewSet(viewsets.GenericViewSet,
     def get_permissions(self):
         if self.action in ["create","update","destroy","partial_update"]:
             return [IsAdminUser()]
+        elif self.action in ["likes"]:
+            return [IsAuthenticated()]
         return []
 
     def create(self, request):
@@ -66,19 +84,40 @@ class PostViewSet(viewsets.GenericViewSet,
         recommended_post_serializer = PostListSerializer(recommended_post, many = True)
         return Response(recommended_post_serializer.data)
     
-    @action(methods=['GET'],detail=True)
-    def like(self, request, pk = None):
-        liked_post = self.get_object()
-        user = request.user
-        if user in liked_post.like.all():
-            liked_post.like.remove(user)
-            liked_post.like_cnt -= 1
+    @action(methods=["POST"], detail= True, permission_classes = [IsAuthenticated])
+    def likes(self, request, pk=None):
+        post = self.get_object()
+        reaction = PostReaction.objects.filter(post=post, user=request.user).first()
+        if reaction:
+            if reaction.reaction == "like":
+                reaction.delete()
+            else:
+                reaction.reaction = "like"
+                reaction.save()
         else:
-            liked_post.like.add(user)
-            liked_post.like_cnt += 1
-
-        liked_post.save(update_fields=["like_cnt"])
+            PostReaction.objects.create(post=post, user=request.user, reaction="like")
         return Response()
+    
+    @action(methods=["POST"], detail= True, permission_classes = [IsAuthenticated])
+    def dislikes(self, request, pk=None):
+        post = self.get_object()
+        reaction = PostReaction.objects.filter(post=post, user=request.user).first()
+        if reaction:
+            if reaction.reaction == "dislike":
+                reaction.delete()
+            else:
+                reaction.reaction = "dislike"
+                reaction.save()
+        else:
+            PostReaction.objects.create(post=post, user=request.user, reaction="dislike")
+        return Response()
+    
+    @action(methods=["GET"], detail= False)
+    def top5(self, request):
+        queryset = self.get_queryset().order_by("-like_cnt")[:5]
+        serializer = PostListSerializer(queryset, many = True)
+        return Response(serializer.data)
+
 
 class CommentViewSet(viewsets.GenericViewSet,
     mixins.RetrieveModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin):
